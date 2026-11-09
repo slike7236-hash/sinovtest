@@ -41,6 +41,10 @@
         .score-row { display: flex; justify-content: space-between; padding: 8px 12px; background: #f8fafc; border-radius: 8px; margin-bottom: 5px; font-size: 14px; }
         .score-row.current { background: #ecfdf5; border: 1px solid #a7f3d0; font-weight: bold; }
     </style>
+    <!-- Firebase SDK (compat) -->
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-auth-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/10.12.2/firebase-firestore-compat.js"></script>
     <script src="questions.js"></script>
 </head>
 <body>
@@ -93,6 +97,24 @@
             }
         } catch (e) { console.log(e); }
     }
+
+    // Training platformasi bilan bir xil Firebase loyihasi.
+    const firebaseConfig = {
+        apiKey: "AIzaSyAqtniC_TRKJMlHTlQGurvTL7g1zXCNz4Y",
+        authDomain: "reytingmyworks.firebaseapp.com",
+        projectId: "reytingmyworks",
+        storageBucket: "reytingmyworks.firebasestorage.app",
+        messagingSenderId: "336402722667",
+        appId: "1:336402722667:web:ae8e02c95583ff3679262e",
+        measurementId: "G-3T36PDMX3B"
+    };
+
+    if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
+    const cloudAuth = firebase.auth();
+    const cloudDB = firebase.firestore();
+    const firebaseReady = cloudAuth.currentUser
+        ? Promise.resolve(cloudAuth.currentUser)
+        : cloudAuth.signInAnonymously().then(credential => credential.user);
 
     const urlParams = new URLSearchParams(window.location.search);
     const lessonKey = urlParams.get('lesson') || "ess1_1";
@@ -207,55 +229,107 @@
         setTimeout(() => { currentIndex++; displayQuestion(); }, 1200);
     }
 
-    function saveAndShowResults() {
-        let leaderboardData = JSON.parse(localStorage.getItem(`leaderboard_${lessonKey}`)) || [];
-        
-        // Yangi natijada endi ball bilan birga jami ketgan vaqt ham yoziladi
-        leaderboardData.push({ name: playerName, score: score, time: totalTimeSpent });
-        
-        // ADOLATLI SARALASH: 
-        // 1. Birinchi navbatda bali balandlar tepaga chiqadi (b.score - a.score)
-        // 2. Agar ball teng bo'lsa, vaqti kichikroq (tezroq ishlagan) tepaga chiqadi (a.time - b.time)
-        leaderboardData.sort((a, b) => {
-            if (b.score !== a.score) return b.score - a.score;
-            return a.time - b.time;
-        });
-        
-        leaderboardData = leaderboardData.slice(0, 5);
-        localStorage.setItem(`leaderboard_${lessonKey}`, JSON.stringify(leaderboardData));
-
+    async function saveAndShowResults() {
+        const total = questions.length;
+        const percent = total ? Math.round(score / total * 100) : 0;
         playSound('win');
 
         document.getElementById("quizBox").innerHTML = `
             <div class="result-screen">
                 <i class="fa-solid fa-trophy" style="font-size: 50px; color: #eab308; margin-bottom: 10px;"></i>
                 <h2>Quiz Completed!</h2>
-                <p>Well done, <b>${playerName}</b>!</p>
-                <p>Score: <b>${score}/${questions.length}</b> | Time: <b>${totalTimeSpent}s</b></p>
-                
+                <p>Well done, <b>${escapeHtml(playerName)}</b>!</p>
+                <p>Score: <b>${score}/${total}</b> (${percent}%) | Time: <b>${totalTimeSpent}s</b></p>
                 <div class="leaderboard">
-                    <h3>🏆 Leaderboard (Top 5)</h3>
-                    <div id="leaderboardRows"></div>
+                    <h3>🏆 Leaderboard (Top 30)</h3>
+                    <div id="leaderboardRows">Natijalar yuklanmoqda...</div>
                 </div>
                 <button class="primary-btn" style="margin-top:15px; width:100%;" onclick="location.reload()">Try Again</button>
             </div>`;
-        
-        showLeaderboard();
+
+        try {
+            await saveBestTestScore({
+                name: playerName,
+                score: score,
+                percent: percent,
+                correct: score,
+                total: total,
+                duration: totalTimeSpent,
+                date: Date.now()
+            });
+            await showLeaderboard();
+        } catch (error) {
+            console.error('Test result save failed:', error);
+            const rows = document.getElementById('leaderboardRows');
+            if (rows) rows.innerHTML = '<p style="color:#dc2626">Natijani Firebase\'ga saqlashda xatolik yuz berdi. Internet va Firestore Rules sozlamalarini tekshiring.</p>';
+        }
     }
 
-    function showLeaderboard() {
-        const rowsBox = document.getElementById("leaderboardRows");
-        let leaderboardData = JSON.parse(localStorage.getItem(`leaderboard_${lessonKey}`)) || [];
-        rowsBox.innerHTML = "";
-        
-        leaderboardData.forEach((player, i) => {
-            let isCurrent = (player.name === playerName && player.score === score && player.time === totalTimeSpent);
-            rowsBox.innerHTML += `
-                <div class="score-row ${isCurrent ? 'current' : ''}">
-                    <span>${i + 1}. ${player.name}</span>
-                    <span>${player.score} pts (${player.time}s)</span>
-                </div>`;
+    // Har bir anonim foydalanuvchi uchun bitta hujjat: faqat eng yaxshi natija saqlanadi.
+    async function saveBestTestScore(result) {
+        const user = await firebaseReady;
+        const boardRef = cloudDB.collection('leaderboards').doc(`${lessonKey}_test`);
+        const scoreRef = boardRef.collection('scores').doc(user.uid);
+
+        await cloudDB.runTransaction(async transaction => {
+            const snapshot = await transaction.get(scoreRef);
+            const previous = snapshot.exists ? snapshot.data() : null;
+            const isBetter = !previous
+                || result.score > Number(previous.score)
+                || (result.score === Number(previous.score) && result.percent > Number(previous.percent))
+                || (result.score === Number(previous.score) && result.percent === Number(previous.percent)
+                    && result.duration < Number(previous.duration));
+
+            if (isBetter) {
+                transaction.set(scoreRef, {
+                    name: String(result.name || 'Student').trim().slice(0, 40),
+                    score: Number(result.score),
+                    percent: Number(result.percent),
+                    correct: Number(result.correct),
+                    total: Number(result.total),
+                    duration: Number(result.duration),
+                    date: Number(result.date),
+                    uid: user.uid
+                });
+            }
         });
+    }
+
+    async function showLeaderboard() {
+        const rowsBox = document.getElementById("leaderboardRows");
+        if (!rowsBox) return;
+
+        const user = await firebaseReady;
+        const snapshot = await cloudDB.collection('leaderboards')
+            .doc(`${lessonKey}_test`).collection('scores').get();
+        const scores = snapshot.docs.map(doc => ({ ...doc.data(), _id: doc.id }));
+        scores.sort((a, b) =>
+            (Number(b.score) - Number(a.score)) ||
+            (Number(b.percent) - Number(a.percent)) ||
+            (Number(a.duration) - Number(b.duration)) ||
+            (Number(a.date) - Number(b.date))
+        );
+
+        const ownIndex = scores.findIndex(item => item.uid === user.uid || item._id === user.uid);
+        const topThirty = scores.slice(0, 30);
+        rowsBox.innerHTML = topThirty.length ? topThirty.map((item, index) => {
+            const isCurrent = item.uid === user.uid || item._id === user.uid;
+            return `<div class="score-row ${isCurrent ? 'current' : ''}">
+                <span>${index + 1}. ${escapeHtml(item.name || 'Student')}</span>
+                <span>${Number(item.score) || 0}/${Number(item.total) || 0} (${Number(item.percent) || 0}%) · ${Number(item.duration) || 0}s</span>
+            </div>`;
+        }).join('') : '<p>Hozircha natijalar yo‘q.</p>';
+
+        if (ownIndex >= 30) {
+            const own = scores[ownIndex];
+            rowsBox.innerHTML += `<div class="score-row current"><span>Sizning o‘rningiz: ${ownIndex + 1}</span><span>${Number(own.score) || 0}/${Number(own.total) || 0} (${Number(own.percent) || 0}%)</span></div>`;
+        }
+    }
+
+    function escapeHtml(value) {
+        return String(value).replace(/[&<>"']/g, character => ({
+            '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
+        })[character]);
     }
 </script>
 </body>
