@@ -265,7 +265,8 @@
         }
     }
 
-    // Har bir anonim foydalanuvchi uchun bitta hujjat: faqat eng yaxshi natija saqlanadi.
+    // Har bir foydalanuvchi uchun bitta hujjat: faqat eng yaxshi natija saqlanadi.
+    // Board ID Training platformasidagi Test bilan bir xil: {lessonKey}_test.
     async function saveBestTestScore(result) {
         const user = await firebaseReady;
         const boardRef = cloudDB.collection('leaderboards').doc(`${lessonKey}_test`);
