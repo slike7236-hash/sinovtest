@@ -112,9 +112,13 @@
     if (!firebase.apps.length) firebase.initializeApp(firebaseConfig);
     const cloudAuth = firebase.auth();
     const cloudDB = firebase.firestore();
-    const firebaseReady = cloudAuth.currentUser
-        ? Promise.resolve(cloudAuth.currentUser)
-        : cloudAuth.signInAnonymously().then(credential => credential.user);
+    // Auth qayta urinib ko‘riladi: sahifa ochilganda internet bo‘lmasa ham
+    // keyinchalik ulanish tiklanganda anonim kirish amalga oshishi mumkin.
+    async function getFirebaseUser() {
+        if (cloudAuth.currentUser) return cloudAuth.currentUser;
+        const credential = await cloudAuth.signInAnonymously();
+        return credential.user;
+    }
 
     const urlParams = new URLSearchParams(window.location.search);
     const lessonKey = urlParams.get('lesson') || "ess1_1";
@@ -181,6 +185,15 @@
         });
     }
 
+    function shuffleAnswers(options) {
+        const shuffled = [...options];
+        for (let i = shuffled.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+        }
+        return shuffled;
+    }
+
     function displayQuestion() {
         if (questions.length === 0) {
             document.getElementById("quizBox").innerHTML = "<p style='text-align:center; color:red;'>No tests found.</p>";
@@ -200,7 +213,8 @@
         const box = document.getElementById("optsBox");
         box.innerHTML = "";
 
-        currentQ.o.forEach(option => {
+        // Javob variantlari har safar yangi tartibda ko'rsatiladi.
+        shuffleAnswers(currentQ.o).forEach(option => {
             let btn = document.createElement("button");
             btn.className = "opt-btn";
             btn.innerText = option;
@@ -229,10 +243,64 @@
         setTimeout(() => { currentIndex++; displayQuestion(); }, 1200);
     }
 
+    function testLocalKey() {
+        return `ew_test_best_${lessonKey}`;
+    }
+    function readLocalTestBest() {
+        try { return JSON.parse(localStorage.getItem(testLocalKey()) || 'null'); }
+        catch (_) { return null; }
+    }
+    function writeLocalTestBest(result) {
+        const previous = readLocalTestBest();
+        const better = !previous
+            || Number(result.score) > Number(previous.score)
+            || (Number(result.score) === Number(previous.score) && Number(result.percent) > Number(previous.percent))
+            || (Number(result.score) === Number(previous.score) && Number(result.percent) === Number(previous.percent)
+                && Number(result.duration) < Number(previous.duration));
+        if (better) localStorage.setItem(testLocalKey(), JSON.stringify(result));
+        return better ? result : previous;
+    }
+    function readPendingTestResult() {
+        try { return JSON.parse(localStorage.getItem(`ew_test_pending_${lessonKey}`) || 'null'); }
+        catch (_) { return null; }
+    }
+    async function syncPendingTestResult() {
+        const pending = readPendingTestResult();
+        if (!pending) return false;
+        try {
+            await saveBestTestScore(pending);
+            localStorage.removeItem(`ew_test_pending_${lessonKey}`);
+            return true;
+        } catch (error) {
+            console.warn('Test natijasi Firebase bilan sinxronlanmadi:', error);
+            return false;
+        }
+    }
+    window.addEventListener('online', async () => {
+        if (await syncPendingTestResult()) {
+            try { await showLeaderboard(); } catch (error) { console.warn(error); }
+        }
+    });
+    document.addEventListener('visibilitychange', async () => {
+        if (document.visibilityState === 'visible' && navigator.onLine) {
+            if (await syncPendingTestResult()) {
+                try { await showLeaderboard(); } catch (error) { console.warn(error); }
+            }
+        }
+    });
+
     async function saveAndShowResults() {
         const total = questions.length;
         const percent = total ? Math.round(score / total * 100) : 0;
         playSound('win');
+        const result = {
+            name: playerName, score, percent, correct: score, total,
+            duration: totalTimeSpent, date: Date.now()
+        };
+
+        // Birinchi navbatda lokal xotiraga saqlanadi.
+        const bestLocalResult = writeLocalTestBest(result);
+        localStorage.setItem(`ew_test_pending_${lessonKey}`, JSON.stringify(bestLocalResult));
 
         document.getElementById("quizBox").innerHTML = `
             <div class="result-screen">
@@ -240,35 +308,50 @@
                 <h2>Quiz Completed!</h2>
                 <p>Well done, <b>${escapeHtml(playerName)}</b>!</p>
                 <p>Score: <b>${score}/${total}</b> (${percent}%) | Time: <b>${totalTimeSpent}s</b></p>
+                <p id="testSyncNotice" style="font-size:13px;color:#b7791f;">Natija qurilmada saqlandi. Firebase bilan sinxronlanmoqda...</p>
                 <div class="leaderboard">
                     <h3>🏆 Leaderboard (Top 30)</h3>
-                    <div id="leaderboardRows">Natijalar yuklanmoqda...</div>
+                    <div id="leaderboardRows">Reyting yuklanmoqda...</div>
                 </div>
                 <button class="primary-btn" style="margin-top:15px; width:100%;" onclick="location.reload()">Try Again</button>
             </div>`;
 
+        renderLocalTestLeaderboard();
         try {
-            await saveBestTestScore({
-                name: playerName,
-                score: score,
-                percent: percent,
-                correct: score,
-                total: total,
-                duration: totalTimeSpent,
-                date: Date.now()
-            });
+            await saveBestTestScore(result);
+            localStorage.removeItem(`ew_test_pending_${lessonKey}`);
+            const notice = document.getElementById('testSyncNotice');
+            if (notice) {
+                notice.textContent = 'Natija Firebase’ga saqlandi.';
+                notice.style.color = '#059669';
+            }
             await showLeaderboard();
         } catch (error) {
             console.error('Test result save failed:', error);
-            const rows = document.getElementById('leaderboardRows');
-            if (rows) rows.innerHTML = '<p style="color:#dc2626">Natijani Firebase\'ga saqlashda xatolik yuz berdi. Internet va Firestore Rules sozlamalarini tekshiring.</p>';
+            const notice = document.getElementById('testSyncNotice');
+            if (notice) notice.textContent = 'Firebase bilan aloqa yo‘q. Natija qurilmada saqlandi va internet qaytganda qayta yuboriladi.';
+            renderLocalTestLeaderboard();
         }
+    }
+
+    function renderLocalTestLeaderboard() {
+        const rowsBox = document.getElementById("leaderboardRows");
+        if (!rowsBox) return;
+        const localBest = readLocalTestBest();
+        if (!localBest) {
+            rowsBox.innerHTML = '<p>Hozircha lokal natija yo‘q.</p>';
+            return;
+        }
+        rowsBox.innerHTML = `<div class="score-row current">
+            <span>1. ${escapeHtml(localBest.name || 'Student')} (shu qurilma)</span>
+            <span>${Number(localBest.score) || 0}/${Number(localBest.total) || 0} (${Number(localBest.percent) || 0}%) · ${Number(localBest.duration) || 0}s</span>
+        </div><p style="font-size:12px;color:#64748b;text-align:center;">Vaqtinchalik lokal natija. Umumiy TOP 30 Firebase bilan aloqa tiklanganda yangilanadi.</p>`;
     }
 
     // Har bir foydalanuvchi uchun bitta hujjat: faqat eng yaxshi natija saqlanadi.
     // Board ID Training platformasidagi Test bilan bir xil: {lessonKey}_test.
     async function saveBestTestScore(result) {
-        const user = await firebaseReady;
+        const user = await getFirebaseUser();
         const boardRef = cloudDB.collection('leaderboards').doc(`${lessonKey}_test`);
         const scoreRef = boardRef.collection('scores').doc(user.uid);
 
@@ -300,7 +383,7 @@
         const rowsBox = document.getElementById("leaderboardRows");
         if (!rowsBox) return;
 
-        const user = await firebaseReady;
+        const user = await getFirebaseUser();
         const snapshot = await cloudDB.collection('leaderboards')
             .doc(`${lessonKey}_test`).collection('scores').get();
         const scores = snapshot.docs.map(doc => ({ ...doc.data(), _id: doc.id }));
