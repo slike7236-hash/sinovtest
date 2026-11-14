@@ -243,47 +243,48 @@
         setTimeout(() => { currentIndex++; displayQuestion(); }, 1200);
     }
 
-    function testLocalKey() {
-        return `ew_test_best_${lessonKey}`;
+    // Har bir urinish qurilmaning localStorage xotirasida saqlanadi.
+    // Faqat birinchi yakunlangan urinish yangi Firebase reytingiga yuboriladi.
+    function testAttemptsKey() {
+        return `ew_test_attempts_${lessonKey}`;
     }
-    function readLocalTestBest() {
-        try { return JSON.parse(localStorage.getItem(testLocalKey()) || 'null'); }
+    function readTestAttempts() {
+        try {
+            const value = JSON.parse(localStorage.getItem(testAttemptsKey()) || '[]');
+            return Array.isArray(value) ? value : [];
+        } catch (_) { return []; }
+    }
+    function saveLocalAttempt(result) {
+        const attempts = readTestAttempts();
+        attempts.push(result);
+        // LocalStorage hajmini cheklash: eng so‘nggi 500 urinish saqlanadi.
+        localStorage.setItem(testAttemptsKey(), JSON.stringify(attempts.slice(-500)));
+        return attempts.length === 1;
+    }
+    function readPendingFirstAttempt() {
+        try { return JSON.parse(localStorage.getItem(`ew_test_first_pending_${lessonKey}`) || 'null'); }
         catch (_) { return null; }
     }
-    function writeLocalTestBest(result) {
-        const previous = readLocalTestBest();
-        const better = !previous
-            || Number(result.score) > Number(previous.score)
-            || (Number(result.score) === Number(previous.score) && Number(result.percent) > Number(previous.percent))
-            || (Number(result.score) === Number(previous.score) && Number(result.percent) === Number(previous.percent)
-                && Number(result.duration) < Number(previous.duration));
-        if (better) localStorage.setItem(testLocalKey(), JSON.stringify(result));
-        return better ? result : previous;
-    }
-    function readPendingTestResult() {
-        try { return JSON.parse(localStorage.getItem(`ew_test_pending_${lessonKey}`) || 'null'); }
-        catch (_) { return null; }
-    }
-    async function syncPendingTestResult() {
-        const pending = readPendingTestResult();
+    async function syncPendingFirstAttempt() {
+        const pending = readPendingFirstAttempt();
         if (!pending) return false;
         try {
-            await saveBestTestScore(pending);
-            localStorage.removeItem(`ew_test_pending_${lessonKey}`);
+            await saveFirstTestScore(pending);
+            localStorage.removeItem(`ew_test_first_pending_${lessonKey}`);
             return true;
         } catch (error) {
-            console.warn('Test natijasi Firebase bilan sinxronlanmadi:', error);
+            console.warn('Birinchi urinish Firebase bilan sinxronlanmadi:', error);
             return false;
         }
     }
     window.addEventListener('online', async () => {
-        if (await syncPendingTestResult()) {
+        if (await syncPendingFirstAttempt()) {
             try { await showLeaderboard(); } catch (error) { console.warn(error); }
         }
     });
     document.addEventListener('visibilitychange', async () => {
         if (document.visibilityState === 'visible' && navigator.onLine) {
-            if (await syncPendingTestResult()) {
+            if (await syncPendingFirstAttempt()) {
                 try { await showLeaderboard(); } catch (error) { console.warn(error); }
             }
         }
@@ -298,9 +299,11 @@
             duration: totalTimeSpent, date: Date.now()
         };
 
-        // Birinchi navbatda lokal xotiraga saqlanadi.
-        const bestLocalResult = writeLocalTestBest(result);
-        localStorage.setItem(`ew_test_pending_${lessonKey}`, JSON.stringify(bestLocalResult));
+        // Har bir urinish lokal xotirada qoladi. Faqat birinchisi reytingga yuboriladi.
+        const isFirstAttempt = saveLocalAttempt(result);
+        if (isFirstAttempt) {
+            localStorage.setItem(`ew_test_first_pending_${lessonKey}`, JSON.stringify(result));
+        }
 
         document.getElementById("quizBox").innerHTML = `
             <div class="result-screen">
@@ -308,7 +311,7 @@
                 <h2>Quiz Completed!</h2>
                 <p>Well done, <b>${escapeHtml(playerName)}</b>!</p>
                 <p>Score: <b>${score}/${total}</b> (${percent}%) | Time: <b>${totalTimeSpent}s</b></p>
-                <p id="testSyncNotice" style="font-size:13px;color:#b7791f;">Natija qurilmada saqlandi. Firebase bilan sinxronlanmoqda...</p>
+                <p id="testSyncNotice" style="font-size:13px;color:#b7791f;">${isFirstAttempt ? 'Birinchi urinish reytingga saqlanmoqda...' : 'Bu qayta urinish. Natija faqat qurilmangiz xotirasida saqlandi; reyting o‘zgarmaydi.'}</p>
                 <div class="leaderboard">
                     <h3>🏆 Leaderboard (Top 30)</h3>
                     <div id="leaderboardRows">Reyting yuklanmoqda...</div>
@@ -316,66 +319,65 @@
                 <button class="primary-btn" style="margin-top:15px; width:100%;" onclick="location.reload()">Try Again</button>
             </div>`;
 
-        renderLocalTestLeaderboard();
+        renderLocalFirstAttempt();
+        if (!isFirstAttempt) {
+            try { await showLeaderboard(); } catch (error) { renderLocalFirstAttempt(); }
+            return;
+        }
+
         try {
-            await saveBestTestScore(result);
-            localStorage.removeItem(`ew_test_pending_${lessonKey}`);
+            const created = await saveFirstTestScore(result);
+            localStorage.removeItem(`ew_test_first_pending_${lessonKey}`);
             const notice = document.getElementById('testSyncNotice');
             if (notice) {
-                notice.textContent = 'Natija Firebase’ga saqlandi.';
+                notice.textContent = created
+                    ? 'Birinchi urinish Firebase reytingiga saqlandi. Keyingi urinishlar reytingni o‘zgartirmaydi.'
+                    : 'Bu foydalanuvchining birinchi urinish natijasi avval saqlangan. Reyting o‘zgartirilmadi.';
                 notice.style.color = '#059669';
             }
             await showLeaderboard();
         } catch (error) {
-            console.error('Test result save failed:', error);
+            console.error('Birinchi urinishni saqlashda xatolik:', error);
             const notice = document.getElementById('testSyncNotice');
-            if (notice) notice.textContent = 'Firebase bilan aloqa yo‘q. Natija qurilmada saqlandi va internet qaytganda qayta yuboriladi.';
-            renderLocalTestLeaderboard();
+            if (notice) notice.textContent = 'Internet/Firebase bilan aloqa yo‘q. Birinchi urinish qurilmada saqlandi va internet qaytganda yuboriladi.';
+            renderLocalFirstAttempt();
         }
     }
 
-    function renderLocalTestLeaderboard() {
+    function renderLocalFirstAttempt() {
         const rowsBox = document.getElementById("leaderboardRows");
         if (!rowsBox) return;
-        const localBest = readLocalTestBest();
-        if (!localBest) {
+        const firstAttempt = readTestAttempts()[0];
+        if (!firstAttempt) {
             rowsBox.innerHTML = '<p>Hozircha lokal natija yo‘q.</p>';
             return;
         }
         rowsBox.innerHTML = `<div class="score-row current">
-            <span>1. ${escapeHtml(localBest.name || 'Student')} (shu qurilma)</span>
-            <span>${Number(localBest.score) || 0}/${Number(localBest.total) || 0} (${Number(localBest.percent) || 0}%) · ${Number(localBest.duration) || 0}s</span>
-        </div><p style="font-size:12px;color:#64748b;text-align:center;">Vaqtinchalik lokal natija. Umumiy TOP 30 Firebase bilan aloqa tiklanganda yangilanadi.</p>`;
+            <span>${escapeHtml(firstAttempt.name || 'Student')} (birinchi urinish, shu qurilma)</span>
+            <span>${Number(firstAttempt.score) || 0}/${Number(firstAttempt.total) || 0} (${Number(firstAttempt.percent) || 0}%) · ${Number(firstAttempt.duration) || 0}s</span>
+        </div><p style="font-size:12px;color:#64748b;text-align:center;">Bu qurilmadagi barcha urinishlar ichki xotirada saqlanadi. Umumiy reytingga faqat birinchi urinish qo‘shiladi.</p>`;
     }
 
-    // Har bir foydalanuvchi uchun bitta hujjat: faqat eng yaxshi natija saqlanadi.
-    // Board ID Training platformasidagi Test bilan bir xil: {lessonKey}_test.
-    async function saveBestTestScore(result) {
+    // Bir UID uchun faqat birinchi natijani yaratadi; mavjud hujjat hech qachon yangilanmaydi.
+    // Yangi alohida board eski "eng yaxshi natija" yozuvlarini o‘zgartirmasdan saqlaydi.
+    async function saveFirstTestScore(result) {
         const user = await getFirebaseUser();
-        const boardRef = cloudDB.collection('leaderboards').doc(`${lessonKey}_test`);
+        const boardRef = cloudDB.collection('leaderboards').doc(`${lessonKey}_test_first`);
         const scoreRef = boardRef.collection('scores').doc(user.uid);
-
-        await cloudDB.runTransaction(async transaction => {
+        return await cloudDB.runTransaction(async transaction => {
             const snapshot = await transaction.get(scoreRef);
-            const previous = snapshot.exists ? snapshot.data() : null;
-            const isBetter = !previous
-                || result.score > Number(previous.score)
-                || (result.score === Number(previous.score) && result.percent > Number(previous.percent))
-                || (result.score === Number(previous.score) && result.percent === Number(previous.percent)
-                    && result.duration < Number(previous.duration));
-
-            if (isBetter) {
-                transaction.set(scoreRef, {
-                    name: String(result.name || 'Student').trim().slice(0, 40),
-                    score: Number(result.score),
-                    percent: Number(result.percent),
-                    correct: Number(result.correct),
-                    total: Number(result.total),
-                    duration: Number(result.duration),
-                    date: Number(result.date),
-                    uid: user.uid
-                });
-            }
+            if (snapshot.exists) return false;
+            transaction.set(scoreRef, {
+                name: String(result.name || 'Student').trim().slice(0, 40),
+                score: Number(result.score),
+                percent: Number(result.percent),
+                correct: Number(result.correct),
+                total: Number(result.total),
+                duration: Number(result.duration),
+                date: Number(result.date),
+                uid: user.uid
+            });
+            return true;
         });
     }
 
@@ -385,7 +387,7 @@
 
         const user = await getFirebaseUser();
         const snapshot = await cloudDB.collection('leaderboards')
-            .doc(`${lessonKey}_test`).collection('scores').get();
+            .doc(`${lessonKey}_test_first`).collection('scores').get();
         const scores = snapshot.docs.map(doc => ({ ...doc.data(), _id: doc.id }));
         scores.sort((a, b) =>
             (Number(b.score) - Number(a.score)) ||
